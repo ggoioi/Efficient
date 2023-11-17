@@ -1,73 +1,54 @@
+'''
+Conv2d와 ReLU를 합쳐서 양자화를 진행하는....->
+두개를 합쳐서 진행할려고 하니 입력사이즈가 커널 사이즈랑 달라서 계속 안된다고 함
+방법을 아예 새로 고안 해야할듯 -->
+일단 autoencoder를 양자화 하기에 필요한 데이터 ->캘리브레이션을 위한 데이터를 찾아야함
+대표적인 정상 데이터를 찾아서 양자화에 활용
+파라미터를 찾아야하기 때문에
+'''
+
 import torch
-from torchvision import transforms
-from PIL import Image
-import os
-from tqdm import tqdm
-import numpy as np
-from common import get_autoencoder, get_pdn_small
+import torchvision.transforms as transforms
+from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader
 
-seed = 1234
-out_channels = 384
+# 모델과 데이터셋 경로 설정
+model_path = 'output/small_v1_10_25/trainings/mvtec_ad'
+dataset_path = 'Data_quanti'
 
-def predict(image, teacher, student, autoencoder):
-    teacher_output = teacher(image)
-    student_output = student(image)
-    autoencoder_output = autoencoder(image)
-    map_st = torch.mean((teacher_output - student_output[:, :out_channels])**2,
-                        dim=1, keepdim=True)
-    map_ae = torch.mean((autoencoder_output -
-                         student_output[:, out_channels:])**2,
-                        dim=1, keepdim=True)
-    map_combined = 0.5 * map_st + 0.5 * map_ae
-    return map_combined
+# GPU 사용 가능 확인
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# 모델 및 기타 설정
-model_size = 'small'
-model = torch.load('./output/small_v2/trainings/mvtec_ad/teacher_final.pth')
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# 모델 로드
+autoencoder = torch.load(model_path+'/autoencoder_final.pth', map_location=device)
 
-# 모델 불러오기
-# 모델 가중치 불러오기
-model.to(device)
-model.eval()
+# 양자화를 위한 설정
+autoencoder.qconfig = torch.quantization.get_default_qconfig('fbgemm')
 
-# Autoencoder 모델 로드
+# 모델을 양자화 준비 상태로 변환
+autoencoder_prepared = torch.quantization.prepare(autoencoder, inplace=False)
 
-autoencoder_model= torch.load('./output/small_v2/trainings/mvtec_ad/autoencoder_final.pth')
-# autoencoder_model.load_state_dict(torch.load(autoencoder_weights_path, map_location=device))
-autoencoder_model.to(device)
-autoencoder_model.eval()
+# 데이터셋 로드를 위한 변환 정의
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    # Normalize는 데이터셋에 따라 평균과 표준편차 값을 조정해야 할 수 있습니다.
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
 
-# 이미지 파일이 있는 디렉토리 경로 설정
-image_dir = 'Data2/test/good'  # 예측할 이미지 파일들이 있는 디렉토리 경로
+# 양자화 캘리브레이션을 위한 데이터셋과 데이터 로더 준비
+calibration_dataset = ImageFolder(root=dataset_path, transform=transform)
+calibration_loader = DataLoader(calibration_dataset, batch_size=32, shuffle=True)
 
-# 결과를 저장할 디렉토리 경로 설정
-output_dir = 'predicted_images'  # 결과 이미지를 저장할 디렉토리 경로
-os.makedirs(output_dir, exist_ok=True)
+# 캘리브레이션 수행
+autoencoder_prepared.eval()
+with torch.no_grad():
+    for data, _ in calibration_loader:
+        autoencoder_prepared(data.to(device))
 
-# 디렉토리 안의 모든 이미지 파일에 대한 예측 수행
-for image_filename in os.listdir(image_dir):
-    if image_filename.endswith('.jpg') or image_filename.endswith('.png'):
-        image_path = os.path.join(image_dir, image_filename)
+# 모델을 최종적으로 양자화하여 int8 버전으로 변환
+autoencoder_int8 = torch.quantization.convert(autoencoder_prepared, inplace=False)
 
-        # 이미지 불러오기 및 전처리
-        image = Image.open(image_path).convert("RGB")
-        transform = transforms.Compose([
-            transforms.Resize((256, 256)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        input_image = transform(image).unsqueeze(0).to(device)
-
-        # 이미지 예측 (Autoencoder 사용)
-        with torch.no_grad():
-            map_combined = predict(
-                image=input_image, teacher=model, student=model, autoencoder=autoencoder_model)
-
-        # 예측 결과를 이미지로 저장
-        output_image = map_combined[0, 0].cpu().numpy()
-        output_filename = os.path.splitext(image_filename)[0] + '_prediction.png'
-        output_path = os.path.join(output_dir, output_filename)
-        Image.fromarray((output_image * 255).astype(np.uint8)).save(output_path)
-
-print("예측이 완료되었습니다. 결과 이미지는", output_dir, "디렉토리에 저장되었습니다.")
+# 양자화된 모델 저장
+torch.save(autoencoder_int8, model_path+'/autoencoder_int8.pth')
+print(autoencoder_int8)
