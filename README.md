@@ -1,4 +1,6 @@
 # EfficientAD Model Implementation
+  ##in branch sungwoo  
+  
 **Model Overview**: The EfficientAD model has been trained to fit our data format and can be used for inference.    
 
 **Execution Files**: Use Inference.py and need_module to run the model. This is applicable only for the models that I have trained.  
