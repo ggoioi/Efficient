@@ -1,5 +1,5 @@
 # EfficientAD Model Implementation
-  ##in branch sungwoo  
+# in branch sungwoo  
   
 **Model Overview**: The EfficientAD model has been trained to fit our data format and can be used for inference.    
 
